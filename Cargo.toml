@@ -1,0 +1,16 @@
+[package]
+name = "rvsdg"
+authors = ["Simon Larsson <simon.larsson-general@protonmail.com>"]
+description = "Rustic standalone implementation of the RVSDG, heavily utilizing arena allocations"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/simvux/rvsdg"
+readme = "README.md"
+keywords = ["rvsdg", "compiler"]
+categories = ["Compilers", "Data structures"]
+documentation = "https://docs.rs/rvsdg"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cranelift-entity = "0.120.0"
+xmlwriter = "0.1.0"
