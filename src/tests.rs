@@ -5,7 +5,7 @@ use std::io::Write;
 // fn fb y = fa (y - 1)
 #[test]
 fn phi() {
-    let (mut ctx, _) = TranslationUnitContext::new();
+    let mut ctx = TranslationUnitContext::new();
 
     let fa = ctx.add_lambda_node();
     let fa_region = ctx.region(fa.node.id);
@@ -83,19 +83,5 @@ fn phi() {
         ctx.connect(apply_output, result);
     });
 
-    export(&ctx);
-}
-
-fn export(ctx: &TranslationUnitContext) {
-    let xml = ctx.to_xml();
-    let mut path = std::env::temp_dir();
-    path.push("rvsdg.xml");
-    let mut f = std::fs::File::create(&path).unwrap();
-    write!(f, "{}", xml).unwrap();
-    println!(" wrote to {}", path.display());
-
-    std::process::Command::new("rvsdg-viewer")
-        .arg(path)
-        .spawn()
-        .unwrap();
+    ctx.open_rvsdg_viewer();
 }

@@ -1,3 +1,4 @@
+use std::fmt;
 use std::marker::PhantomData;
 
 use cranelift_entity::entity_impl;
@@ -45,5 +46,11 @@ impl<K> Node<K> {
             id,
             _kind: PhantomData,
         }
+    }
+}
+
+impl<K> fmt::Display for Node<K> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.id.fmt(f)
     }
 }

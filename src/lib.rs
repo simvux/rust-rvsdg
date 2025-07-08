@@ -1,22 +1,40 @@
 use cranelift_entity::{EntityList, ListPool, PrimaryMap, SecondaryMap};
-use std::{any::Any, collections::HashMap};
+use std::collections::HashMap;
+use std::io::Write;
+use tracing::{info, trace};
 
 mod edge;
-pub use edge::{Edge, Input, Origin, Output, User};
+pub use edge::{Argument, Edge, Input, Origin, Output, Result, User};
 pub mod id;
-mod nodes;
+pub mod nodes;
+pub use nodes::NodeKind;
 use nodes::*;
 #[cfg(test)]
 mod tests;
 mod xml;
+pub use xml::{new_xml, open_viewer};
 
-pub trait NodeKind: std::any::Any + std::fmt::Debug {
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-    fn node_type(&self) -> &str;
+#[macro_export]
+macro_rules! node_kind_impl {
+    ($ty:ty, $kind:literal) => {
+        impl NodeKind for $ty {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+
+            fn node_type(&self) -> &str {
+                $kind
+            }
+        }
+    };
 }
 
 /// The context for a whole translation unit
+#[derive(Debug)]
 pub struct TranslationUnitContext {
     nodes: PrimaryMap<id::AnyNode, Node>,
     regions: PrimaryMap<id::Region, Region>,
@@ -26,22 +44,26 @@ pub struct TranslationUnitContext {
     node_id_pool: ListPool<id::AnyNode>,
     region_id_pool: ListPool<id::Region>,
 
-    region: id::Region,
+    pub region: id::Region,
 }
 
+#[derive(Debug)]
 struct Node {
     // Self-referential node id
     id: id::AnyNode,
+    region: id::Region,
 
     inputs: u32,
     outputs: u32,
 
     regions: EntityList<id::Region>,
 
-    kind: Box<dyn NodeKind>,
+    kind: Box<dyn NodeKind + Send + Sync>,
 }
 
+#[derive(Debug)]
 struct Region {
+    container_node: Option<id::AnyNode>,
     arguments: u32,
     results: u32,
 
@@ -51,7 +73,7 @@ struct Region {
 }
 
 impl TranslationUnitContext {
-    pub fn new() -> (Self, id::Node<TranslationUnit>) {
+    pub fn new() -> Self {
         let mut omega = TranslationUnitContext {
             nodes: PrimaryMap::new(),
             regions: PrimaryMap::new(),
@@ -61,12 +83,9 @@ impl TranslationUnitContext {
             region: id::Region::from_u32(0),
         };
 
-        let tunit = omega.add_node(|omega, _| {
-            let region = omega.add_region(0, 0);
-            (TranslationUnit { region }, [region])
-        });
+        omega.add_region(0, 0);
 
-        (omega, tunit)
+        omega
     }
 
     pub fn in_region<T>(&mut self, region: id::Region, f: impl FnOnce(&mut Self) -> T) -> T {
@@ -119,14 +138,20 @@ impl TranslationUnitContext {
 
         let (kind, regions) = init(self, node_id);
 
+        trace!("adding {node_id} in {}", self.region);
+
         let mut node = Node {
             kind: Box::new(kind),
+            region: self.region,
             inputs: 0,
             outputs: 0,
             regions: EntityList::new(),
             id: any_node_id,
         };
 
+        for region in regions {
+            self.regions[region].container_node = Some(any_node_id);
+        }
         node.regions.extend(regions, &mut self.region_id_pool);
 
         assert_eq!(
@@ -142,12 +167,13 @@ impl TranslationUnitContext {
         node_id
     }
 
-    pub fn add_symbol(&mut self, node: id::AnyNode, sym: String) {
-        self.symbols[node] = sym;
+    pub fn add_symbol(&mut self, node: id::AnyNode, sym: impl Into<String>) {
+        self.symbols[node] = sym.into();
     }
 
     fn add_region(&mut self, arguments: u32, results: u32) -> id::Region {
         self.regions.push(Region {
+            container_node: None,
             arguments,
             results,
             edges: vec![],
@@ -251,20 +277,36 @@ impl TranslationUnitContext {
         self.add_output(node_id)
     }
 
-    pub fn add_input<K: NodeKind>(&mut self, node: id::Node<K>) -> Input<K> {
+    fn debug_node(&self, node: id::AnyNode) -> String {
+        let sym = &self.symbols[node];
+        if sym == "" {
+            format!("{node}")
+        } else {
+            format!("{node}·{sym}")
+        }
+    }
+
+    pub fn add_input<K>(&mut self, node: id::Node<K>) -> Input<K> {
         let inputs = &mut self.nodes[node.id].inputs;
         let input = id::Input::from_u32(*inputs);
         *inputs += 1;
 
+        trace!("added input {input} for {}", self.debug_node(node.id));
+
         // Forward this input as an argument to each contained region.
         for region in self.nodes[node.id].regions.as_slice(&self.region_id_pool) {
-            self.regions[*region].arguments += 1;
+            let arguments = &mut self.regions[*region].arguments;
+            *arguments += 1;
+            assert!(
+                dbg!(*arguments) >= dbg!(input.as_u32() + 1),
+                "region has fewer arguments than node has inputs"
+            );
         }
 
         Input { id: input, node }
     }
 
-    pub fn input_as_argument<K>(&self, input: Input<K>) -> id::Argument {
+    pub fn input_as_argument<K>(&self, input: Input<K>) -> Argument {
         let region = self.region(input.node.id);
         let args = self.regions[region].arguments;
         let inputs = self.nodes[input.node.id].inputs;
@@ -272,53 +314,243 @@ impl TranslationUnitContext {
         let node_custom_args = args - inputs;
 
         let forwarded_arg = node_custom_args + input.id.as_u32();
-        id::Argument::from_u32(forwarded_arg)
+        let id = id::Argument::from_u32(forwarded_arg);
+        Argument { id, region }
+    }
+
+    pub fn argument_as_input(
+        &self,
+        region: id::Region,
+        argument: id::Argument,
+    ) -> Option<Input<id::AnyNode>> {
+        let args = self.regions[region].arguments;
+        let node = self.regions[region].container_node.unwrap();
+        let inputs = self.nodes[node].inputs;
+
+        let node_custom_args = args - inputs;
+
+        // λ x y 2 3 4
+        // check 2 >= 2
+        // yield 2 - 2
+        if argument.as_u32() >= node_custom_args {
+            let id = id::Input::from_u32(argument.as_u32() - node_custom_args);
+            Some(Input {
+                node: id::Node::new(node),
+                id,
+            })
+        } else {
+            None
+        }
     }
 
     pub fn add_output<K>(&mut self, node: id::Node<K>) -> Output<K> {
-        let outputs = &mut self.nodes[node.id].inputs;
+        let outputs = &mut self.nodes[node.id].outputs;
         let output = id::Output::from_u32(*outputs);
         *outputs += 1;
         Output { id: output, node }
     }
 
-    pub fn add_argument(&mut self) -> id::Argument {
+    pub fn add_argument(&mut self) -> Argument {
         let arguments = &mut self.regions[self.region].arguments;
         let arg = id::Argument::from_u32(*arguments);
         *arguments += 1;
-        arg
+
+        trace!("added argument {arg} for {}", self.region);
+
+        Argument {
+            id: arg,
+            region: self.region,
+        }
     }
 
-    pub fn add_result(&mut self) -> id::Result {
+    pub fn add_result(&mut self) -> Result {
         let results = &mut self.regions[self.region].results;
         let result = id::Result::from_u32(*results);
         *results += 1;
-        result
+
+        trace!("added result {result} for {}", self.region);
+
+        Result {
+            id: result,
+            region: self.region,
+        }
     }
 
     pub fn connect(&mut self, origin: impl Into<Origin>, user: impl Into<User>) {
-        let node_list = self.regions[self.region].nodes.as_slice(&self.node_id_pool);
+        let origin = origin.into();
+        let user = user.into();
+        let ok = self.try_connect(origin, user);
+        if !ok {
+            panic!("no available path to connect {origin:?} → {user:?}");
+        }
+    }
+
+    /// Try to find a path to make the connection. Returns false if unable.
+    pub fn try_connect(&mut self, origin: impl Into<Origin>, user: impl Into<User>) -> bool {
+        const CONNECTED: bool = true;
 
         // TODO: We could resolve recenv lambda nodes here and edge-case them to 'fix' connections?
         // That way we could effectively 'hide' recenv's from user API.
+
         let origin = origin.into();
         let user = user.into();
 
-        if let User::Input(node_id, _) = user {
-            assert!(
-                node_list.contains(&node_id),
-                "connection user is an input to a node in a different region"
-            );
+        trace!("trying to connect {origin:?} -> {user:?}");
+
+        if self.connection_exists(origin, user) {
+            return CONNECTED;
         }
+
+        // TODO: we need to be able to detect cycles and reformat things into recenvs.
+
+        match origin {
+            Origin::Output(node_id, output) => {
+                let Some(origin) = self.find_and_connect_output(node_id, output) else {
+                    return !CONNECTED;
+                };
+
+                self.raw_connect_asserted(origin, user);
+                return CONNECTED;
+            }
+            Origin::Argument(region, arg) => {
+                let arg = Argument { region, id: arg };
+                let Some(origin) = self.find_and_connect_argument(arg) else {
+                    return !CONNECTED;
+                };
+
+                self.raw_connect_asserted(origin, user);
+                return CONNECTED;
+            }
+        }
+    }
+
+    // We can just traverse regions upwards until we find the one that has the node we need
+
+    fn find_and_connect_output(
+        &mut self,
+        output_node: id::AnyNode,
+        output: id::Output,
+    ) -> Option<Origin> {
+        let region = &self.regions[self.region];
+
+        if region
+            .nodes
+            .as_slice(&self.node_id_pool)
+            .contains(&output_node)
+        {
+            Some(Origin::Output(output_node, output))
+        } else {
+            let Some(in_node) = region.container_node else {
+                // We've reached omega. There's no path to node
+                return None;
+            };
+
+            let parent_region = self.nodes[in_node].region;
+
+            // The output we're trying to connect is not from a node in this region.
+            // So; try the parent region. If it succeeded then forward that new connection into the
+            // current region.
+            self.in_region(parent_region, |this| {
+                this.find_and_connect_output(output_node, output)
+                    .map(|origin| {
+                        let input = this.add_input::<id::AnyNode>(id::Node::new(in_node));
+                        let arg = this.input_as_argument(input);
+                        this.raw_connect_asserted(origin, input);
+                        Origin::Argument(arg.region, arg.id)
+                    })
+            })
+        }
+    }
+
+    fn find_and_connect_argument(&mut self, arg: Argument) -> Option<Origin> {
+        trace!("attempting to find path from {arg:?} to {}", self.region);
+
+        if self.region == arg.region {
+            Some(Origin::from(arg))
+        } else {
+            let Some(parent_node) = self.regions[self.region].container_node else {
+                trace!("can not connect from {}", self.region);
+                return None;
+            };
+
+            trace!("not in current region, checking parent {parent_node:?}");
+
+            let parent_region = self.nodes[parent_node].region;
+            self.in_region(parent_region, |this| {
+                this.find_and_connect_argument(arg).map(|origin| {
+                    dbg!(&origin);
+                    let input = this.add_input::<id::AnyNode>(id::Node::new(parent_node));
+                    let arg = this.input_as_argument(input);
+                    this.raw_connect_asserted(origin, input);
+                    Origin::Argument(arg.region, arg.id)
+                })
+            })
+        }
+    }
+
+    // Raw-connect an origin to a node and return the created argument for the contained region
+    fn forward_origin_as_argument(&mut self, origin: Origin) -> Argument {
+        todo!();
+    }
+
+    /// Connect without any implicit automatic connections but still assert against incorrect connections
+    pub fn raw_connect_asserted(&mut self, origin: impl Into<Origin>, user: impl Into<User>) {
+        let origin = origin.into();
+        let user = user.into();
+
+        info!("connecting {origin:?} → {user:?}");
 
         if let Origin::Output(node_id, _) = origin {
             assert!(
-                node_list.contains(&node_id),
-                "connection origin is an output of a node from a different region"
+                self.current_nodes().contains(&node_id),
+                "origin {origin:?} is from node not in current {}",
+                self.region
             );
         }
 
+        if let User::Input(node_id, _) = user {
+            assert!(
+                self.current_nodes().contains(&node_id),
+                "user {user:?} is for node not in current {}",
+                self.region
+            );
+        }
+
+        unsafe { self.raw_connect(origin, user) }
+    }
+
+    /// NOTE: While this function is memory safe, it's marked as unsafe since it allows you to
+    /// break the rules of what defines an RVSDG and can break any assumptions made by code analysis.
+    unsafe fn raw_connect(&mut self, origin: impl Into<Origin>, user: impl Into<User>) {
+        let origin = origin.into();
+        let user = user.into();
         self.regions[self.region].edges.push(Edge { origin, user });
+    }
+
+    fn current_nodes(&self) -> &[id::AnyNode] {
+        self.regions[self.region].nodes.as_slice(&self.node_id_pool)
+    }
+
+    fn connection_exists(&self, origin: Origin, user: User) -> bool {
+        self.regions[self.region]
+            .edges
+            .iter()
+            .find(|edge| (edge.user == user) && self.edge_leads_to_origin(&edge, origin))
+            .is_some()
+    }
+
+    fn edge_leads_to_origin(&self, edge: &Edge, origin: Origin) -> bool {
+        edge.origin == origin
+            || match edge.origin {
+                Origin::Output(..) => false,
+                Origin::Argument(_, argument) => {
+                    let Some(input) = self.argument_as_input(self.region, argument) else {
+                        return false;
+                    };
+
+                    self.connection_exists(origin, input.into())
+                }
+            }
     }
 
     pub fn move_node(&mut self, node: id::AnyNode, to: id::Region) {
@@ -330,6 +562,11 @@ impl TranslationUnitContext {
             .expect("node is not in current region");
         rnodes.remove(i, &mut self.node_id_pool);
         self.regions[to].nodes.push(node, &mut self.node_id_pool);
+    }
+
+    pub fn open_rvsdg_viewer(&mut self) {
+        let xml = self.to_xml();
+        xml::open_viewer(xml)
     }
 }
 
@@ -347,10 +584,4 @@ fn get_kind_mut<K: NodeKind>(nodes: &mut PrimaryMap<id::AnyNode, Node>, id: id::
         .as_any_mut()
         .downcast_mut()
         .expect("node is not of expected kind")
-}
-
-impl Node {
-    // fn new(name: String) -> Node {
-    //     Node {}
-    // }
 }

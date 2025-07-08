@@ -3,14 +3,15 @@ use std::fmt;
 use xmlwriter::{Options, XmlWriter};
 
 pub struct XmlCtx<'ctx> {
-    stack: Vec<StackEntry<'ctx>>,
+    stack: Vec<StackEntry>,
     ctx: &'ctx TranslationUnitContext,
     xml: XmlWriter,
 }
 
-enum StackEntry<'ctx> {
+enum StackEntry {
+    Unit(String),
     Node(id::AnyNode),
-    Region(&'ctx str),
+    Region(id::Region),
 }
 
 impl<'ctx> XmlCtx<'ctx> {
@@ -20,7 +21,7 @@ impl<'ctx> XmlCtx<'ctx> {
         self.xml.start_element("node");
         self.stack.push(StackEntry::Node(id));
 
-        self.xml.write_attribute("id", &id);
+        self.xml.write_attribute("id", &self.prefixed(""));
         if let Some(name) = self.ctx.symbols.get(id) {
             self.xml.write_attribute("name", &name);
         }
@@ -40,50 +41,59 @@ impl<'ctx> XmlCtx<'ctx> {
         }
 
         for region in node.regions.as_slice(&self.ctx.region_id_pool) {
-            self.write_region("", region);
+            self.write_region(*region);
         }
 
         self.stack.pop();
         self.xml.end_element();
     }
 
-    pub fn write_region(&mut self, id: &'ctx str, region: &'ctx id::Region) {
+    pub fn write_region(&mut self, region: id::Region) {
         self.xml.start_element("region");
-        self.xml.write_attribute("id", &id);
-        self.stack.push(StackEntry::Region(id));
+        self.stack.push(StackEntry::Region(region));
 
-        for a in self.ctx.arguments(*region) {
+        // self.xml.write_attribute("id", &self.prefixed(""));
+
+        for a in self.ctx.arguments(region) {
             self.xml.start_element("argument");
             self.xml.write_attribute("id", &self.prefixed(a));
-            // self.xml.write_attribute("name", &m.name);
             self.xml.end_element();
         }
 
-        for r in self.ctx.results(*region) {
+        for r in self.ctx.results(region) {
             self.xml.start_element("result");
             self.xml.write_attribute("id", &self.prefixed(r));
-            // self.xml.write_attribute("name", &m.name);
             self.xml.end_element();
         }
 
-        for node_id in self.ctx.nodes(*region) {
+        for node_id in self.ctx.nodes(region) {
             self.write_node(node_id);
         }
 
-        for edge in &self.ctx.regions[*region].edges {
+        for edge in &self.ctx.regions[region].edges {
             self.xml.start_element("edge");
             self.xml.write_attribute(
                 "source",
                 &match edge.origin {
-                    Origin::Output(node, output) => self.prefixed(format!("{node}.{output}")),
-                    Origin::Argument(argument) => self.prefixed(argument),
+                    Origin::Output(node, output) => {
+                        self.stack.push(StackEntry::Node(node));
+                        let str = self.prefixed(&output);
+                        self.stack.pop().unwrap();
+                        str
+                    }
+                    Origin::Argument(_, argument) => self.prefixed(&argument),
                 },
             );
             self.xml.write_attribute(
                 "target",
                 &match edge.user {
-                    User::Input(node, input) => self.prefixed(format!("{node}.{input}")),
-                    User::Result(result) => self.prefixed(result),
+                    User::Input(node, input) => {
+                        self.stack.push(StackEntry::Node(node));
+                        let str = self.prefixed(&input);
+                        self.stack.pop().unwrap();
+                        str
+                    }
+                    User::Result(_, result) => self.prefixed(&result),
                 },
             );
             self.xml.end_element();
@@ -97,25 +107,53 @@ impl<'ctx> XmlCtx<'ctx> {
         let mut buf = String::new();
         for entry in &self.stack {
             match entry {
-                StackEntry::Node(node_id) => buf.push_str(&node_id.to_string()),
-                StackEntry::Region(name) => buf.push_str(&format!("region[{name}]")),
+                StackEntry::Node(id) => match self.ctx.symbols.get(*id) {
+                    Some(sym) => buf.push_str(sym),
+                    None => buf.push_str(&format!("n{}", id.as_u32())),
+                },
+                StackEntry::Region(id) => buf.push_str(&format!("r{}", id.as_u32())),
+                StackEntry::Unit(name) => buf.push_str(&format!("{name}")),
             }
             buf.push('.');
         }
-        // if buf.ends_with('.') {
-        //     buf.pop();
-        // }
         buf.push_str(&v.to_string());
         buf
     }
 }
 
-impl TranslationUnitContext {
-    pub fn to_xml(&self) -> String {
-        let opt = Options::default();
-        let mut xml = XmlWriter::new(opt);
+pub fn new_xml() -> XmlWriter {
+    let opt = Options::default();
+    let mut xml = XmlWriter::new(opt);
+    xml.start_element("rvsdg");
+    xml
+}
 
-        xml.start_element("rvsdg");
+pub fn open_viewer(xml: String) {
+    let mut path = std::env::temp_dir();
+    path.push("rvsdg.xml");
+    let mut f = std::fs::File::create(&path).unwrap();
+    write!(f, "{}", xml).unwrap();
+    println!(" wrote to {}", path.display());
+
+    std::process::Command::new("rvsdg-viewer")
+        .arg(path)
+        .spawn()
+        .unwrap();
+}
+
+impl TranslationUnitContext {
+    pub fn add_to_xml(&self, name: String, xml: XmlWriter) -> XmlWriter {
+        let mut ctx = XmlCtx {
+            xml,
+            stack: vec![StackEntry::Unit(name)],
+            ctx: self,
+        };
+        ctx.write_node(id::AnyNode::from_u32(0));
+        ctx.xml
+    }
+
+    pub fn to_xml(&self) -> String {
+        let xml = new_xml();
 
         let mut ctx = XmlCtx {
             xml,

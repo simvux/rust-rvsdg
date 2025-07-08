@@ -9,13 +9,13 @@ pub struct Edge {
 #[derive(Clone, PartialEq, Eq, Debug, Copy)]
 pub enum User {
     Input(id::AnyNode, id::Input),
-    Result(id::Result),
+    Result(id::Region, id::Result),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Origin {
     Output(id::AnyNode, id::Output),
-    Argument(id::Argument),
+    Argument(id::Region, id::Argument),
 }
 
 #[derive(Debug)]
@@ -28,6 +28,36 @@ pub struct Input<K> {
 pub struct Output<K> {
     pub node: id::Node<K>,
     pub id: id::Output,
+}
+
+#[derive(Debug)]
+pub struct Argument {
+    pub region: id::Region,
+    pub id: id::Argument,
+}
+
+#[derive(Debug)]
+pub struct Result {
+    pub region: id::Region,
+    pub id: id::Result,
+}
+
+impl<K> Output<K> {
+    pub fn downgrade(self) -> Output<id::AnyNode> {
+        Output {
+            node: id::Node::new(self.node.id),
+            id: self.id,
+        }
+    }
+}
+
+impl<K> Input<K> {
+    pub fn downgrade(self) -> Input<id::AnyNode> {
+        Input {
+            node: id::Node::new(self.node.id),
+            id: self.id,
+        }
+    }
 }
 
 impl<K> Clone for Input<K> {
@@ -56,9 +86,9 @@ impl<K> From<Input<K>> for User {
     }
 }
 
-impl From<id::Result> for User {
-    fn from(result: id::Result) -> Self {
-        User::Result(result)
+impl From<Result> for User {
+    fn from(result: Result) -> Self {
+        User::Result(result.region, result.id)
     }
 }
 
@@ -68,8 +98,8 @@ impl<K> From<Output<K>> for Origin {
     }
 }
 
-impl From<id::Argument> for Origin {
-    fn from(argument: id::Argument) -> Self {
-        Origin::Argument(argument)
+impl From<Argument> for Origin {
+    fn from(argument: Argument) -> Self {
+        Origin::Argument(argument.region, argument.id)
     }
 }
