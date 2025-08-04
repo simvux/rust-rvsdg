@@ -49,6 +49,12 @@ impl<K> Node<K> {
     }
 }
 
+impl From<AnyNode> for Node<AnyNode> {
+    fn from(id: AnyNode) -> Self {
+        Node::new(id)
+    }
+}
+
 impl<K> fmt::Display for Node<K> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.id.fmt(f)

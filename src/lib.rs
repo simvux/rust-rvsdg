@@ -48,7 +48,7 @@ pub struct TranslationUnitContext {
 }
 
 #[derive(Debug)]
-struct Node {
+pub struct Node {
     // Self-referential node id
     id: id::AnyNode,
     region: id::Region,
@@ -86,6 +86,14 @@ impl TranslationUnitContext {
         omega.add_region(0, 0);
 
         omega
+    }
+
+    pub fn get<K: NodeKind>(&self, id: id::Node<K>) -> &K {
+        get_kind(&self.nodes, id)
+    }
+
+    pub fn get_mut<K: NodeKind>(&mut self, id: id::Node<K>) -> &mut K {
+        get_kind_mut(&mut self.nodes, id)
     }
 
     pub fn in_region<T>(&mut self, region: id::Region, f: impl FnOnce(&mut Self) -> T) -> T {

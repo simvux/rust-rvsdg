@@ -138,6 +138,8 @@ pub fn open_viewer(xml: String) {
     std::process::Command::new("rvsdg-viewer")
         .arg(path)
         .spawn()
+        .unwrap()
+        .wait()
         .unwrap();
 }
 

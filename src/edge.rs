@@ -30,20 +30,20 @@ pub struct Output<K> {
     pub id: id::Output,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Argument {
     pub region: id::Region,
     pub id: id::Argument,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Result {
     pub region: id::Region,
     pub id: id::Result,
 }
 
 impl<K> Output<K> {
-    pub fn downgrade(self) -> Output<id::AnyNode> {
+    pub fn downcast(self) -> Output<id::AnyNode> {
         Output {
             node: id::Node::new(self.node.id),
             id: self.id,
@@ -52,7 +52,7 @@ impl<K> Output<K> {
 }
 
 impl<K> Input<K> {
-    pub fn downgrade(self) -> Input<id::AnyNode> {
+    pub fn downcast(self) -> Input<id::AnyNode> {
         Input {
             node: id::Node::new(self.node.id),
             id: self.id,
